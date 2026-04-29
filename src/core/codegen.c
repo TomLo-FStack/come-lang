@@ -24,6 +24,15 @@ static void emit_c_string_literal(FILE* f, const char* s) {
     fprintf(f, "%s", s);
 }
 
+static void emit_c_string_escaped(FILE* f, const char* s) {
+    for (; *s; s++) {
+        if (*s == '\\' || *s == '"') {
+            fputc('\\', f);
+        }
+        fputc(*s, f);
+    }
+}
+
 // Track source file for #line directives
 static const char* source_filename = NULL;
 static int last_emitted_line = -1;
@@ -43,7 +52,9 @@ static void emit_line_directive(FILE* f, ASTNode* node) {
     
     // Only emit if line changed to avoid clutter
     if (node->source_line != last_emitted_line) {
-        fprintf(f, "\n#line %d \"%s\"\n", node->source_line, source_filename);
+        fprintf(f, "\n#line %d \"", node->source_line);
+        emit_c_string_escaped(f, source_filename);
+        fprintf(f, "\"\n");
         last_emitted_line = node->source_line;
     }
 }
@@ -1752,7 +1763,11 @@ int generate_c_from_ast(ASTNode* ast, const char* out_file, const char* source_f
 
     fprintf(f, "#include <math.h>\n");
     fprintf(f, "#include <stdlib.h>\n");
-    fprintf(f, "#include <arpa/inet.h>\n"); // For htons
+    fprintf(f, "#ifdef _WIN32\n");
+    fprintf(f, "extern unsigned short __stdcall htons(unsigned short hostshort);\n");
+    fprintf(f, "#else\n");
+    fprintf(f, "#include <arpa/inet.h>\n");
+    fprintf(f, "#endif\n"); // For htons
 
     // Runtime Preamble
     fprintf(f, "\n/* Runtime Preamble */\n");

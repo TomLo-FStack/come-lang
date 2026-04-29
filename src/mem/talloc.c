@@ -1,6 +1,41 @@
 #include "mem/talloc.h"
-#include "talloc.h"   // from src/external/talloc/include
 #include <stdio.h>
+
+#ifdef _WIN32
+#include <stdlib.h>
+
+void mem_talloc_module_init(void) {
+}
+
+void mem_talloc_module_shutdown(void) {
+}
+
+void* mem_talloc_alloc(void* ctx, size_t size) {
+    (void)ctx;
+    return calloc(1, size);
+}
+
+void* mem_talloc_realloc(void* ctx, void* ptr, size_t size) {
+    (void)ctx;
+    return realloc(ptr, size);
+}
+
+void mem_talloc_free(void* ptr) {
+    free(ptr);
+}
+
+void* mem_talloc_new_ctx(void* parent) {
+    (void)parent;
+    return calloc(1, 1);
+}
+
+void* mem_talloc_steal(void* new_ctx, void* ptr) {
+    (void)new_ctx;
+    return ptr;
+}
+
+#else
+#include "talloc.h"   // from src/external/talloc/include
 
 static void* co_mem_root = NULL;
 
@@ -49,3 +84,4 @@ void* mem_talloc_steal(void* new_ctx, void* ptr) {
     if (!new_ctx) new_ctx = co_mem_root;
     return talloc_steal(new_ctx, ptr);
 }
+#endif

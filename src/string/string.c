@@ -4,7 +4,9 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef _WIN32
 #include <regex.h>
+#endif
 
 
 // Module Initialization
@@ -422,6 +424,7 @@ come_string_t* come_string_substr(const come_string_t* a, size_t start, size_t e
 
 
 // Regex
+#ifndef _WIN32
 bool come_string_regex(const come_string_t* a, const char* pattern) {
     if (!a || !pattern) return false;
     regex_t regex;
@@ -577,6 +580,43 @@ come_string_t* come_string_regex_replace(const come_string_t* a, const char* pat
     regfree(&regex);
     return res;
 }
+#else
+bool come_string_regex(const come_string_t* a, const char* pattern) {
+    (void)a;
+    (void)pattern;
+    return false;
+}
+
+come_string_list_t* come_string_regex_split(const come_string_t* a, const char* pattern, size_t n) {
+    (void)pattern;
+    (void)n;
+    if (!a) return NULL;
+    come_string_list_t* list = mem_talloc_alloc((void*)a, sizeof(come_string_list_t) + sizeof(come_string_t*));
+    if (!list) return NULL;
+    list->size = 1;
+    list->count = 1;
+    list->items[0] = come_string_new_len(list, a->data, strlen(a->data));
+    return list;
+}
+
+come_string_list_t* come_string_regex_groups(const come_string_t* a, const char* pattern) {
+    (void)pattern;
+    if (!a) return NULL;
+    come_string_list_t* empty = mem_talloc_alloc((void*)a, sizeof(come_string_list_t));
+    if (!empty) return NULL;
+    empty->size = 0;
+    empty->count = 0;
+    return empty;
+}
+
+come_string_t* come_string_regex_replace(const come_string_t* a, const char* pattern, const char* repl, size_t count) {
+    (void)pattern;
+    (void)repl;
+    (void)count;
+    if (!a) return NULL;
+    return come_string_new_len((void*)a, a->data, strlen(a->data));
+}
+#endif
 
 uint32_t come_string_list_len(const come_string_list_t* list) {
     if (!list) return 0;
