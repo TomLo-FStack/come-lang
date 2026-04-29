@@ -141,6 +141,160 @@ static const char* c_type_name(const char* type) {
     return type;
 }
 
+static int is_string_expression(ASTNode* arg) {
+    if (!arg) return 0;
+
+    if (arg->type == AST_IDENTIFIER) {
+        const char* type = get_local_variable_type(arg->text);
+        return type && (strcmp(type, "string") == 0 || strcmp(type, "come_string_t*") == 0);
+    }
+
+    if (arg->type == AST_METHOD_CALL || arg->type == AST_CALL) {
+        const char* name = arg->text;
+        return strcmp(name, "upper") == 0 || strcmp(name, "lower") == 0 ||
+            strcmp(name, "repeat") == 0 || strcmp(name, "replace") == 0 ||
+            strcmp(name, "trim") == 0 || strcmp(name, "ltrim") == 0 ||
+            strcmp(name, "rtrim") == 0 || strcmp(name, "substr") == 0 ||
+            strcmp(name, "join") == 0 || strcmp(name, "new") == 0 ||
+            strcmp(name, "str") == 0 || strcmp(name, "gets") == 0;
+    }
+
+    if (arg->type == AST_ARRAY_ACCESS) {
+        ASTNode* arr = arg->children[0];
+        if (arr->type == AST_IDENTIFIER) {
+            const char* type = get_local_variable_type(arr->text);
+            if (type && (strstr(type, "string[]") || strstr(type, "come_string_list_t"))) return 1;
+            return strcmp(arr->text, "parts") == 0 || strcmp(arr->text, "groups") == 0 ||
+                strcmp(arr->text, "regex_parts") == 0 || strcmp(arr->text, "args") == 0;
+        }
+    }
+
+    return 0;
+}
+
+static void emit_printf_call(FILE* f, const char* prefix, ASTNode* node) {
+    char* fmt_modified = NULL;
+    int* bool_args = NULL;
+    int* wide_int_args = NULL;
+    int arg_count = node->child_count;
+
+    fprintf(f, "%s", prefix);
+
+    if (arg_count > 1 && node->children[1]->type == AST_STRING_LITERAL) {
+        bool_args = calloc(arg_count + 1, sizeof(int));
+        wide_int_args = calloc(arg_count + 1, sizeof(int));
+        char* raw_fmt = node->children[1]->text;
+        fmt_modified = calloc(strlen(raw_fmt) * 2 + 100, 1);
+
+        char* src = raw_fmt;
+        char* dst = fmt_modified;
+        int current_arg_idx = 2;
+
+        while (*src) {
+            if (*src == '%' && *(src + 1) != '%') {
+                *dst++ = *src++;
+
+                while (*src && strchr("-+ #0", *src)) *dst++ = *src++;
+
+                if (*src == '*') {
+                    *dst++ = *src++;
+                    current_arg_idx++;
+                } else {
+                    while (*src && isdigit((unsigned char)*src)) *dst++ = *src++;
+                }
+
+                if (*src == '.') {
+                    *dst++ = *src++;
+                    if (*src == '*') {
+                        *dst++ = *src++;
+                        current_arg_idx++;
+                    } else {
+                        while (*src && isdigit((unsigned char)*src)) *dst++ = *src++;
+                    }
+                }
+
+                char length_mod[8];
+                int length_len = 0;
+                while (*src && strchr("hljzL", *src) && length_len < 7) {
+                    length_mod[length_len++] = *src++;
+                }
+                length_mod[length_len] = '\0';
+
+                char spec = *src;
+                if (strcmp(length_mod, "l") == 0 && spec && strchr("diuoxX", spec)) {
+                    if (current_arg_idx < arg_count) {
+                        wide_int_args[current_arg_idx] = strchr("uoxX", spec) ? 2 : 1;
+                    }
+                    *dst++ = 'l';
+                    *dst++ = 'l';
+                } else {
+                    for (int li = 0; li < length_len; li++) *dst++ = length_mod[li];
+                }
+
+                if (*src == 't') {
+                    if (current_arg_idx < arg_count) bool_args[current_arg_idx] = 1;
+                    *dst++ = 's';
+                    src++;
+                } else if (*src == 'T') {
+                    if (current_arg_idx < arg_count) bool_args[current_arg_idx] = 2;
+                    *dst++ = 's';
+                    src++;
+                } else {
+                    if (*src) *dst++ = *src++;
+                }
+                current_arg_idx++;
+            } else if (*src == '%' && *(src + 1) == '%') {
+                *dst++ = *src++;
+                *dst++ = *src++;
+            } else {
+                *dst++ = *src++;
+            }
+        }
+        *dst = '\0';
+    }
+
+    for (int i = 1; i < node->child_count; i++) {
+        if (i > 1) fprintf(f, ", ");
+
+        if (i == 1 && fmt_modified) {
+            fprintf(f, "%s", fmt_modified);
+            continue;
+        }
+
+        if (bool_args && bool_args[i] != 0) {
+            fprintf(f, "(");
+            generate_expression(f, node->children[i]);
+            fprintf(f, bool_args[i] == 1 ? " ? \"true\" : \"false\")" : " ? \"TRUE\" : \"FALSE\")");
+            continue;
+        }
+
+        if (wide_int_args && wide_int_args[i] != 0) {
+            fprintf(f, "((%s)(", wide_int_args[i] == 2 ? "unsigned long long" : "long long");
+            generate_expression(f, node->children[i]);
+            fprintf(f, "))");
+            continue;
+        }
+
+        ASTNode* arg = node->children[i];
+        if (arg->type == AST_STRING_LITERAL) {
+            generate_expression(f, arg);
+        } else if (is_string_expression(arg)) {
+            fprintf(f, "(");
+            generate_expression(f, arg);
+            fprintf(f, " ? ");
+            generate_expression(f, arg);
+            fprintf(f, "->data : \"NULL\")");
+        } else {
+            generate_expression(f, arg);
+        }
+    }
+
+    fprintf(f, ")");
+    free(fmt_modified);
+    free(bool_args);
+    free(wide_int_args);
+}
+
 
 static void generate_expression(FILE* f, ASTNode* node) {
     if (!node) {
@@ -240,7 +394,8 @@ static void generate_expression(FILE* f, ASTNode* node) {
             if (strcmp(receiver->text, "mem")==0 && strcmp(method, "cpy")==0) {
                  strcpy(c_func, "memcpy");
              } else if (strcmp(receiver->text, "std")==0 && strcmp(method, "printf")==0) {
-                 strcpy(c_func, "printf"); 
+                 emit_printf_call(f, "printf(", node);
+                 return;
              } else {
                  if (is_import) {
                      // New schema for imported modules: come_MODULE__FUNC
@@ -256,159 +411,7 @@ static void generate_expression(FILE* f, ASTNode* node) {
                  strcmp(receiver->children[0]->text, "std") == 0) {
             
              if ((strcmp(receiver->text, "out") == 0 || strcmp(receiver->text, "err") == 0) && strcmp(method, "printf") == 0) {
-                 strcpy(c_func, "fprintf");
-                 if (strcmp(receiver->text, "out") == 0) fprintf(f, "fprintf(stdout, ");
-                 else fprintf(f, "fprintf(stderr, ");
-                 skip_receiver = 1;
-                 // Loop args
-                 char* fmt_modified = NULL;
-                 int* bool_args = NULL;
-                 int* wide_int_args = NULL;
-                 int arg_count = node->child_count;
-                 
-                 // Pre-scan for format string modification
-                 if (arg_count > 1 && node->children[1]->type == AST_STRING_LITERAL) {
-                     bool_args = calloc(arg_count + 1, sizeof(int)); // +1 safety
-                     wide_int_args = calloc(arg_count + 1, sizeof(int));
-                     char* raw_fmt = node->children[1]->text; 
-                     fmt_modified = calloc(strlen(raw_fmt) * 2 + 100, 1);
-                     
-                     char* src = raw_fmt;
-                     char* dst = fmt_modified;
-                     int current_arg_idx = 2; // Arrrgs buffer index (2, 3...)
-                     
-                     while (*src) {
-                         if (*src == '%' && *(src+1) != '%') {
-                             *dst++ = *src++; // Copy %
-                             
-                             // Flags
-                             while (*src && strchr("-+ #0", *src)) *dst++ = *src++;
-                             
-                             // Width
-                             if (*src == '*') { *dst++ = *src++; current_arg_idx++; }
-                             else while (*src && isdigit(*src)) *dst++ = *src++;
-                             
-                             // Precision
-                             if (*src == '.') {
-                                 *dst++ = *src++;
-                                 if (*src == '*') { *dst++ = *src++; current_arg_idx++; }
-                                 else while (*src && isdigit(*src)) *dst++ = *src++;
-                             }
-                             
-                             // Length
-                             char length_mod[8];
-                             int length_len = 0;
-                             while (*src && strchr("hljzL", *src) && length_len < 7) {
-                                 length_mod[length_len++] = *src++;
-                             }
-                             length_mod[length_len] = '\0';
-
-                             char spec = *src;
-                             if (strcmp(length_mod, "l") == 0 && spec && strchr("diuoxX", spec)) {
-                                 if (current_arg_idx < arg_count) {
-                                     wide_int_args[current_arg_idx] = strchr("uoxX", spec) ? 2 : 1;
-                                 }
-                                 *dst++ = 'l';
-                                 *dst++ = 'l';
-                             } else {
-                                 for (int li = 0; li < length_len; li++) *dst++ = length_mod[li];
-                             }
-
-                             // Specifier
-                             if (*src == 't') {
-                                 if (current_arg_idx < arg_count) bool_args[current_arg_idx] = 1;
-                                 *dst++ = 's'; // Replace with %s
-                                 src++;
-                             } else if (*src == 'T') {
-                                 if (current_arg_idx < arg_count) bool_args[current_arg_idx] = 2;
-                                 *dst++ = 's'; // Replace with %s
-                                 src++;
-                             } else {
-                                 if (*src) *dst++ = *src++;
-                             }
-                             current_arg_idx++;
-                         } else {
-                             if (*src == '%' && *(src+1) == '%') {
-                                 *dst++ = *src++; // Copy first %
-                                 *dst++ = *src++; // Copy second %
-                             } else {
-                                 *dst++ = *src++;
-                             }
-                         }
-                     }
-                     *dst = '\0';
-                 }
-
-                 for (int i = 1; i < node->child_count; i++) {
-                     if (i > 1) fprintf(f, ", ");
-                     
-                     if (i == 1 && fmt_modified) {
-                         fprintf(f, "%s", fmt_modified);
-                         continue;
-                     }
-                     
-                     if (bool_args && bool_args[i] != 0) {
-                         fprintf(f, "(");
-                         generate_expression(f, node->children[i]);
-                         if (bool_args[i] == 1) fprintf(f, " ? \"true\" : \"false\")");
-                         else fprintf(f, " ? \"TRUE\" : \"FALSE\")");
-                         continue;
-                     }
-
-                     if (wide_int_args && wide_int_args[i] != 0) {
-                         fprintf(f, "((%s)(", wide_int_args[i] == 2 ? "unsigned long long" : "long long");
-                         generate_expression(f, node->children[i]);
-                         fprintf(f, "))");
-                         continue;
-                     }
-                     
-                     ASTNode* arg = node->children[i];
-                     
-                     // Detect if arg is string-typed expression
-                     int is_str = 0;
-                     if (arg->type == AST_IDENTIFIER) {
-                          const char* type = get_local_variable_type(arg->text);
-                          if (type && (strcmp(type, "string") == 0 || strcmp(type, "come_string_t*") == 0)) {
-                              is_str = 1;
-                          }
-                      } else if (arg->type == AST_METHOD_CALL || arg->type == AST_CALL) {
-                          // Check methods that return strings
-                           // Check methods/functions that return strings (NOT len/size/count which return uint)
-                           const char* name = arg->text;
-                           
-                           if (strcmp(name, "upper") == 0 || strcmp(name, "lower") == 0 || 
-                               strcmp(name, "repeat") == 0 || strcmp(name, "replace") == 0 || 
-                               strcmp(name, "trim") == 0 || strcmp(name, "ltrim") == 0 || 
-                               strcmp(name, "rtrim") == 0 || strcmp(name, "substr") == 0 || 
-                               strcmp(name, "join") == 0 || strcmp(name, "new") == 0 || 
-                               strcmp(name, "str") == 0 || strcmp(name, "gets") == 0) {
-                               is_str = 1;
-                           }
-                     } else if (arg->type == AST_ARRAY_ACCESS) {
-                         // parts[0], groups[1] etc assuming array of strings
-                         ASTNode* arr = arg->children[0];
-                         if (arr->type == AST_IDENTIFIER) {
-                              if (strcmp(arr->text, "parts")==0 || strcmp(arr->text, "groups")==0 || strcmp(arr->text, "regex_parts")==0 || strcmp(arr->text, "args")==0) {
-                                  is_str = 1;
-                              }
-                         }
-                     } else if (arg->type == AST_STRING_LITERAL) {
-                         generate_expression(f, arg); // string literal is perfectly %s safe (char*)
-                         continue;
-                     }
-
-                     if (is_str) {
-                         fprintf(f, "(");
-                         generate_expression(f, arg);
-                         fprintf(f, " ? ");
-                         generate_expression(f, arg);
-                         fprintf(f, "->data : \"NULL\")");
-                     } else {
-                         generate_expression(f, arg);
-                     }
-
-                 }
-                 fprintf(f, ")");
+                 emit_printf_call(f, strcmp(receiver->text, "out") == 0 ? "fprintf(stdout, " : "fprintf(stderr, ", node);
                  return;
              }
         }

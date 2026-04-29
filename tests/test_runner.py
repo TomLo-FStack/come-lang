@@ -108,6 +108,14 @@ def run_e2e_tests(root):
     return failed == 0
 
 
+def expected_output_for(source):
+    expected = []
+    for line in Path(source).read_text(encoding="utf-8").splitlines():
+        if "// EXPECT:" in line:
+            expected.append(line.split("// EXPECT:", 1)[1].strip())
+    return expected
+
+
 def unit_specs(root):
     build_tests = root / "build" / "tests"
     return [
@@ -199,9 +207,9 @@ def run_come_tests(root):
         print(f"    [{RED}FAIL{NC}] Compiler not found at {compiler}")
         return False
 
-    tests = sorted((root / "src").glob("**/t/*.co"))
+    tests = sorted(list((root / "t").glob("*.co")) + list((root / "src").glob("**/t/*.co")))
     if not tests:
-        print("No COME language tests found under src/**/t/")
+        print("No COME language tests found under t/ or src/**/t/")
         return True
 
     passed = 0
@@ -210,11 +218,41 @@ def run_come_tests(root):
         tmp = Path(td)
         for source in tests:
             print(rel(root, source))
-            bin_path = tmp / f"{source.parent.parent.name}_{source.stem}{exe_suffix()}"
+            group = "root" if source.parent == root / "t" else source.parent.parent.name
+            bin_path = tmp / f"{group}_{source.stem}{exe_suffix()}"
             if run([compiler, "build", source, "-o", bin_path], root, "Compilation failed") != 0:
                 failed += 1
                 continue
-            if run([bin_path], root, "Runtime failed") != 0:
+
+            expected = expected_output_for(source)
+            proc = subprocess.run(
+                [str(bin_path)],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+            )
+
+            if expected:
+                output = proc.stdout.strip()
+                expected_str = "\n".join(expected)
+                if proc.returncode == 0 and output == expected_str:
+                    print(f"    {GREEN}PASS{NC}")
+                    passed += 1
+                else:
+                    print(f"    [{RED}FAIL{NC}] Output mismatch")
+                    print(f"      Expected:\n{expected_str}")
+                    print(f"      Got:\n{output}")
+                    failed += 1
+                continue
+
+            if proc.stdout:
+                for line in proc.stdout.splitlines():
+                    if line.strip():
+                        print(f"    {line}")
+            if proc.returncode != 0:
+                print(f"    [{RED}FAIL{NC}] Runtime failed")
                 failed += 1
                 continue
             print(f"    {GREEN}PASS{NC}")
