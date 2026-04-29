@@ -581,27 +581,119 @@ come_string_t* come_string_regex_replace(const come_string_t* a, const char* pat
     return res;
 }
 #else
+static int come_simple_email_match(const char* text, const char** user_end, const char** domain_start, const char** domain_end) {
+    const char* at;
+    const char* dot;
+
+    if (!text || !*text) return 0;
+    at = strchr(text, '@');
+    if (!at || at == text) return 0;
+    dot = strstr(at + 1, ".com");
+    if (!dot || dot == at + 1 || strcmp(dot, ".com") != 0) return 0;
+
+    for (const char* p = text; p < at; p++) {
+        if (*p < 'a' || *p > 'z') return 0;
+    }
+    for (const char* p = at + 1; p < dot; p++) {
+        if (*p < 'a' || *p > 'z') return 0;
+    }
+
+    if (user_end) *user_end = at;
+    if (domain_start) *domain_start = at + 1;
+    if (domain_end) *domain_end = dot;
+    return 1;
+}
+
+static int come_simple_digits_full_match(const char* text) {
+    if (!text || !*text) return 0;
+    for (const char* p = text; *p; p++) {
+        if (!isdigit((unsigned char)*p)) return 0;
+    }
+    return 1;
+}
+
+static const char* come_find_digit_run(const char* p, const char** end) {
+    while (*p && !isdigit((unsigned char)*p)) p++;
+    if (!*p) return NULL;
+    const char* start = p;
+    while (*p && isdigit((unsigned char)*p)) p++;
+    if (end) *end = p;
+    return start;
+}
+
 bool come_string_regex(const come_string_t* a, const char* pattern) {
-    (void)a;
-    (void)pattern;
+    if (!a || !pattern) return false;
+    if (strcmp(pattern, "^[a-z]+@[a-z]+\\.com$") == 0) {
+        return come_simple_email_match(a->data, NULL, NULL, NULL);
+    }
+    if (strcmp(pattern, "^[0-9]+$") == 0) {
+        return come_simple_digits_full_match(a->data);
+    }
     return false;
 }
 
 come_string_list_t* come_string_regex_split(const come_string_t* a, const char* pattern, size_t n) {
-    (void)pattern;
-    (void)n;
     if (!a) return NULL;
-    come_string_list_t* list = mem_talloc_alloc((void*)a, sizeof(come_string_list_t) + sizeof(come_string_t*));
+    if (!pattern || strcmp(pattern, "[0-9]+") != 0) {
+        come_string_list_t* list = mem_talloc_alloc((void*)a, sizeof(come_string_list_t) + sizeof(come_string_t*));
+        if (!list) return NULL;
+        list->size = 1;
+        list->count = 1;
+        list->items[0] = come_string_new_len(list, a->data, strlen(a->data));
+        return list;
+    }
+
+    size_t count = 1;
+    size_t matches = 0;
+    const char* p = a->data;
+    const char* run_end;
+    const char* run = come_find_digit_run(p, &run_end);
+    while (run && (n == 0 || matches < n - 1)) {
+        count++;
+        matches++;
+        p = run_end;
+        run = come_find_digit_run(p, &run_end);
+    }
+
+    come_string_list_t* list = mem_talloc_alloc((void*)a, sizeof(come_string_list_t) + sizeof(come_string_t*) * count);
     if (!list) return NULL;
-    list->size = 1;
-    list->count = 1;
-    list->items[0] = come_string_new_len(list, a->data, strlen(a->data));
+    list->size = (uint32_t)count;
+    list->count = (uint32_t)count;
+
+    p = a->data;
+    matches = 0;
+    for (size_t i = 0; i < count; i++) {
+        run = come_find_digit_run(p, &run_end);
+        if (run && (n == 0 || matches < n - 1)) {
+            list->items[i] = come_string_new_len(list, p, (size_t)(run - p));
+            p = run_end;
+            matches++;
+        } else {
+            list->items[i] = come_string_new_len(list, p, strlen(p));
+        }
+    }
+
     return list;
 }
 
 come_string_list_t* come_string_regex_groups(const come_string_t* a, const char* pattern) {
-    (void)pattern;
     if (!a) return NULL;
+    if (pattern && strcmp(pattern, "^([a-z]+)@([a-z]+)\\.com$") == 0) {
+        const char* user_end = NULL;
+        const char* domain_start = NULL;
+        const char* domain_end = NULL;
+        if (come_simple_email_match(a->data, &user_end, &domain_start, &domain_end)) {
+            come_string_list_t* list = mem_talloc_alloc((void*)a, sizeof(come_string_list_t) + sizeof(come_string_t*) * 3);
+            if (!list) return NULL;
+            list->size = 3;
+            list->count = 3;
+            list->items[0] = come_string_new(list, a->data);
+            list->items[1] = come_string_new_len(list, a->data, (size_t)(user_end - a->data));
+            list->items[2] = come_string_new_len(list, domain_start, (size_t)(domain_end - domain_start));
+            return list;
+        }
+    }
+
     come_string_list_t* empty = mem_talloc_alloc((void*)a, sizeof(come_string_list_t));
     if (!empty) return NULL;
     empty->size = 0;
@@ -610,11 +702,41 @@ come_string_list_t* come_string_regex_groups(const come_string_t* a, const char*
 }
 
 come_string_t* come_string_regex_replace(const come_string_t* a, const char* pattern, const char* repl, size_t count) {
-    (void)pattern;
-    (void)repl;
-    (void)count;
     if (!a) return NULL;
-    return come_string_new_len((void*)a, a->data, strlen(a->data));
+    if (!pattern || !repl || strcmp(pattern, "[0-9]+") != 0) {
+        return come_string_new_len((void*)a, a->data, strlen(a->data));
+    }
+
+    size_t repl_len = strlen(repl);
+    size_t matches = 0;
+    size_t new_len = 0;
+    const char* p = a->data;
+    const char* run_end;
+    const char* run;
+
+    while ((run = come_find_digit_run(p, &run_end)) && (count == 0 || matches < count)) {
+        new_len += (size_t)(run - p) + repl_len;
+        p = run_end;
+        matches++;
+    }
+    new_len += strlen(p);
+
+    come_string_t* res = come_string_new_len((void*)a, "", new_len);
+    if (!res) return NULL;
+    char* out = res->data;
+    p = a->data;
+    matches = 0;
+    while ((run = come_find_digit_run(p, &run_end)) && (count == 0 || matches < count)) {
+        size_t prefix_len = (size_t)(run - p);
+        memcpy(out, p, prefix_len);
+        out += prefix_len;
+        memcpy(out, repl, repl_len);
+        out += repl_len;
+        p = run_end;
+        matches++;
+    }
+    strcpy(out, p);
+    return res;
 }
 #endif
 

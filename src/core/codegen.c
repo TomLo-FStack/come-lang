@@ -135,6 +135,12 @@ static const char* infer_const_type(ASTNode* node) {
     return "int";
 }
 
+static const char* c_type_name(const char* type) {
+    if (strcmp(type, "long") == 0) return "long long";
+    if (strcmp(type, "ulong") == 0) return "unsigned long long";
+    return type;
+}
+
 
 static void generate_expression(FILE* f, ASTNode* node) {
     if (!node) {
@@ -203,7 +209,6 @@ static void generate_expression(FILE* f, ASTNode* node) {
         if (node->children[0]->type == AST_IDENTIFIER && strcmp(node->children[0]->text, "p1") == 0) {
              fprintf(f, ").%s", node->text);
         } else if (is_ptr) {
-             fprintf(stderr, "DEBUG: Member access on pointer: '%s'\n", node->children[0]->text);
              fprintf(f, ")->%s", node->text);
         } else {
              fprintf(f, ").%s", node->text);
@@ -258,11 +263,13 @@ static void generate_expression(FILE* f, ASTNode* node) {
                  // Loop args
                  char* fmt_modified = NULL;
                  int* bool_args = NULL;
+                 int* wide_int_args = NULL;
                  int arg_count = node->child_count;
                  
                  // Pre-scan for format string modification
                  if (arg_count > 1 && node->children[1]->type == AST_STRING_LITERAL) {
                      bool_args = calloc(arg_count + 1, sizeof(int)); // +1 safety
+                     wide_int_args = calloc(arg_count + 1, sizeof(int));
                      char* raw_fmt = node->children[1]->text; 
                      fmt_modified = calloc(strlen(raw_fmt) * 2 + 100, 1);
                      
@@ -289,8 +296,24 @@ static void generate_expression(FILE* f, ASTNode* node) {
                              }
                              
                              // Length
-                             while (*src && strchr("hljzL", *src)) *dst++ = *src++;
-                             
+                             char length_mod[8];
+                             int length_len = 0;
+                             while (*src && strchr("hljzL", *src) && length_len < 7) {
+                                 length_mod[length_len++] = *src++;
+                             }
+                             length_mod[length_len] = '\0';
+
+                             char spec = *src;
+                             if (strcmp(length_mod, "l") == 0 && spec && strchr("diuoxX", spec)) {
+                                 if (current_arg_idx < arg_count) {
+                                     wide_int_args[current_arg_idx] = strchr("uoxX", spec) ? 2 : 1;
+                                 }
+                                 *dst++ = 'l';
+                                 *dst++ = 'l';
+                             } else {
+                                 for (int li = 0; li < length_len; li++) *dst++ = length_mod[li];
+                             }
+
                              // Specifier
                              if (*src == 't') {
                                  if (current_arg_idx < arg_count) bool_args[current_arg_idx] = 1;
@@ -329,6 +352,13 @@ static void generate_expression(FILE* f, ASTNode* node) {
                          generate_expression(f, node->children[i]);
                          if (bool_args[i] == 1) fprintf(f, " ? \"true\" : \"false\")");
                          else fprintf(f, " ? \"TRUE\" : \"FALSE\")");
+                         continue;
+                     }
+
+                     if (wide_int_args && wide_int_args[i] != 0) {
+                         fprintf(f, "((%s)(", wide_int_args[i] == 2 ? "unsigned long long" : "long long");
+                         generate_expression(f, node->children[i]);
+                         fprintf(f, "))");
                          continue;
                      }
                      
@@ -940,7 +970,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
         
         // Return type
         // Handle "byte" etc alias?? no, just print text
-        fprintf(f, "%s %s(", ret_type->text, func_name);
+        fprintf(f, "%s %s(", c_type_name(ret_type->text), func_name);
         
         // Args
         int has_args = 0;
@@ -978,7 +1008,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
                     // special case for main(string args) -> we pass string list
                     fprintf(f, "come_string_list_t* %s", arg->text);
                 } else {
-                   fprintf(f, "%s %s", type->text, arg->text);
+                   fprintf(f, "%s %s", c_type_name(type->text), arg->text);
                 }
             } else {
                 // Fallback
@@ -1129,7 +1159,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
                      if (strcmp(type_node->text, "var")==0) {
                          fprintf(f, "int %s = ", node->text);
                      } else {
-                         fprintf(f, "%s %s = ", type_node->text, node->text);
+                         fprintf(f, "%s %s = ", c_type_name(type_node->text), node->text);
                      }
                      
                      // For struct types with aggregate initializers, preserve the syntax
@@ -1309,7 +1339,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
                          // "byte[]" usually come_byte_array_t* in my codegen.
                          fprintf(f, "come_%s_array_t* %s;\n", raw_type, field->text);
                      } else {
-                         fprintf(f, "%s %s;\n", type->text, field->text);
+                         fprintf(f, "%s %s;\n", c_type_name(type->text), field->text);
                      }
                  } else {
                      generate_node(f, field, indent + 4);
@@ -1406,7 +1436,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
                 if (field->type == AST_VAR_DECL) {
                     ASTNode* type = field->children[1];
                     emit_indent(f, indent + 4);
-                    fprintf(f, "%s %s;\n", type->text, field->text);
+                    fprintf(f, "%s %s;\n", c_type_name(type->text), field->text);
                 } else {
                     generate_node(f, field, indent + 4);
                 }
@@ -1434,15 +1464,16 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
             fprintf(f, "case ");
             generate_expression(f, node->children[0]);
             fprintf(f, ": {\n");
-            for (int i=1; i < node->child_count; i++) {
+            int has_fallthrough = node->child_count > 1 &&
+                node->children[node->child_count - 1]->type == AST_FALLTHROUGH;
+            int stmt_end = has_fallthrough ? node->child_count - 1 : node->child_count;
+            for (int i=1; i < stmt_end; i++) {
                 generate_node(f, node->children[i], indent+4);
             }
-            // Explicit break needed unless Fallthrough? 
-            // COME spec: "Does NOT fall through by default".
-            // So we add break unless last stmt is Fallthrough (not tracked yet)
-            // For now, always break.
-            emit_indent(f, indent+4);
-            fprintf(f, "break;\n");
+            if (!has_fallthrough) {
+                emit_indent(f, indent+4);
+                fprintf(f, "break;\n");
+            }
             emit_indent(f, indent);
             fprintf(f, "}\n");
             break;
@@ -1518,7 +1549,7 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
                     // Actually let's assume it's common.
                     ASTNode* decl = node->children[0];
                     ASTNode* type = decl->children[1];
-                    fprintf(f, "%s %s = ", type->text, decl->text);
+                    fprintf(f, "%s %s = ", c_type_name(type->text), decl->text);
                     generate_expression(f, decl->children[0]);
                 } else {
                     generate_expression(f, node->children[0]);
@@ -1562,6 +1593,11 @@ static void generate_node(FILE* f, ASTNode* node, int indent) {
         case AST_CONTINUE: {
             emit_indent(f, indent);
             fprintf(f, "continue;\n");
+            break;
+        }
+        case AST_FALLTHROUGH: {
+            emit_indent(f, indent);
+            fprintf(f, "/* fallthrough */\n");
             break;
         }
         default:
@@ -1764,17 +1800,23 @@ int generate_c_from_ast(ASTNode* ast, const char* out_file, const char* source_f
     fprintf(f, "#include <math.h>\n");
     fprintf(f, "#include <stdlib.h>\n");
     fprintf(f, "#ifdef _WIN32\n");
-    fprintf(f, "extern unsigned short __stdcall htons(unsigned short hostshort);\n");
+    fprintf(f, "#ifdef __GNUC__\n");
+    fprintf(f, "#define COME_UNUSED __attribute__((unused))\n");
+    fprintf(f, "#else\n");
+    fprintf(f, "#define COME_UNUSED\n");
+    fprintf(f, "#endif\n");
+    fprintf(f, "static COME_UNUSED unsigned short come_htons(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }\n");
     fprintf(f, "#else\n");
     fprintf(f, "#include <arpa/inet.h>\n");
-    fprintf(f, "#endif\n"); // For htons
+    fprintf(f, "#define come_htons(x) htons(x)\n");
+    fprintf(f, "#endif\n");
 
     // Runtime Preamble
     fprintf(f, "\n/* Runtime Preamble */\n");
 
     
     fprintf(f, "#define come_free(p) mem_talloc_free(p)\n");
-    fprintf(f, "#define come_net_hton(x) htons(x)\n");
+    fprintf(f, "#define come_net_hton(x) come_htons((unsigned short)(x))\n");
     
     
     
@@ -1858,7 +1900,7 @@ int generate_c_from_ast(ASTNode* ast, const char* out_file, const char* source_f
                        fprintf(f, "void %s(", func_name);
                   } else {
                        if (strcmp(ret->text, "string") == 0) fprintf(f, "come_string_t* %s(", func_name);
-                       else fprintf(f, "%s %s(", ret->text, func_name);
+                       else fprintf(f, "%s %s(", c_type_name(ret->text), func_name);
                   }
              } else {
                   // Fallback for void return without explicit type? or AST_FUNCTION without children?
@@ -1899,7 +1941,7 @@ int generate_c_from_ast(ASTNode* ast, const char* out_file, const char* source_f
                             fprintf(f, "void"); // Multi-return hack
                        } else {
                             if (strcmp(type->text, "string")==0) fprintf(f, "come_string_t*");
-                            else fprintf(f, "%s", type->text);
+                            else fprintf(f, "%s", c_type_name(type->text));
                        }
                   } else {
                      fprintf(f, "void*"); // Fallback

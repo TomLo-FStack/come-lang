@@ -45,6 +45,7 @@ typedef enum {
     AST_IMPORT,
     AST_BREAK,
     AST_CONTINUE,
+    AST_FALLTHROUGH,
     AST_CAST,
     AST_TERNARY,
     AST_TYPE_END

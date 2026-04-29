@@ -11,7 +11,7 @@ DL_LIB := -ldl
 endif
 
 # Final binary
-TARGET := $(BUILD_DIR)/come
+TARGET := $(BUILD_DIR)/come$(EXEEXT)
 
 # Link all objects into final binary
 .PHONY: $(SUB_DIRS)

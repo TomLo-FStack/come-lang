@@ -121,6 +121,15 @@ static const char *path_basename_ptr(const char *path) {
     return sep ? sep + 1 : path;
 }
 
+#ifdef _WIN32
+static void append_exe_suffix_if_needed(char *path, size_t sz) {
+    const char *base = path_basename_ptr(path);
+    const char *dot = strrchr(base, '.');
+    if (dot) return;
+    if (strlen(path) + 4 < sz) strcat(path, ".exe");
+}
+#endif
+
 static void copy_path_dirname(const char *path, char *out, size_t sz) {
     size_t len = strlen(path);
     while (len > 0 && is_path_sep(path[len - 1])) len--;
@@ -227,7 +236,11 @@ static void check_build_essentials(void) {
     int ret = system(cmd);
     if (ret != 0) {
         fprintf(stderr, "Error: Build essentials (gcc) not found.\n");
+#ifdef _WIN32
+        fprintf(stderr, "Please install MinGW-w64 and ensure gcc.exe is on PATH.\n");
+#else
         fprintf(stderr, "Please install gcc/build-essential (e.g. apt install build-essential)\n");
+#endif
         exit(1);
     }
 }
@@ -367,9 +380,14 @@ static void compile_file(const char *source_path, const char *forced_o_path) {
     time_t t_src = get_mtime(abs_path);
     time_t t_c = get_mtime(c_file);
     time_t t_o = get_mtime(o_file);
+    time_t t_compiler = 0;
+    char compiler_exe_for_cache[PATH_MAX];
+    if (executable_path(compiler_exe_for_cache, sizeof(compiler_exe_for_cache))) {
+        t_compiler = get_mtime(compiler_exe_for_cache);
+    }
 
-    int need_transpile = (t_src > t_c);
-    int need_compile = (need_transpile || t_c > t_o || t_src > t_o);
+    int need_transpile = (t_src > t_c || t_compiler > t_c);
+    int need_compile = (need_transpile || t_c > t_o || t_src > t_o || t_compiler > t_o);
     
     if (get_mtime(o_file) == 0) need_compile = 1;
     if (forced_o_path) need_compile = 0; // If forcing output (genc), we might not compile or we don't care about object
@@ -544,6 +562,10 @@ int main(int argc, char *argv[]) {
              strcpy(out_bin, tmp);
         }
     }
+
+#ifdef _WIN32
+    append_exe_suffix_if_needed(out_bin, sizeof(out_bin));
+#endif
 
     // Construct Link Command
     char exe_path[PATH_MAX];

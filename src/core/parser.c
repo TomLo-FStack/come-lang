@@ -836,7 +836,12 @@ static ASTNode* parse_statement() {
             if (current()->type == TOKEN_SEMICOLON) advance();
             return node;
         }
-        case TOKEN_FALLTHROUGH: advance(); return NULL;
+        case TOKEN_FALLTHROUGH: {
+            advance();
+            ASTNode* node = ast_new(AST_FALLTHROUGH);
+            if (current()->type == TOKEN_SEMICOLON) advance();
+            return node;
+        }
         default: return parse_expression_statement();
     }
 }
