@@ -53,6 +53,103 @@ def compiler_path(root):
     return compiler
 
 
+def build_artifacts_ready(root):
+    required = [
+        compiler_path(root),
+        root / "build" / "std.o",
+        root / "build" / "string.o",
+        root / "build" / "array.o",
+        root / "build" / "map.o",
+        root / "build" / "talloc.o",
+    ]
+    if not is_windows():
+        required.append(root / "build" / "talloc_lib.o")
+    return all(path.exists() for path in required)
+
+
+def build_include_flags():
+    return [
+        "-Wall",
+        "-g",
+        "-D__STDC_WANT_LIB_EXT1__=1",
+        "-Isrc/include",
+        "-Isrc/core/include",
+        "-Isrc/external/talloc/lib/talloc",
+        "-Isrc/external/talloc/lib/replace",
+    ]
+
+
+def compile_object(root, gcc, flags, source, output):
+    return run([gcc, *flags, "-c", root / source, "-o", root / output], root, f"Compile failed: {source}") == 0
+
+
+def combine_objects(root, output, inputs):
+    ld = shutil.which("ld")
+    if ld:
+        cmd = [ld, "-r", *[root / obj for obj in inputs], "-o", root / output]
+    else:
+        gcc = shutil.which("gcc")
+        if not gcc:
+            print(f"    [{RED}FAIL{NC}] ld/gcc not found")
+            return False
+        cmd = [gcc, "-r", *[root / obj for obj in inputs], "-o", root / output]
+    return run(cmd, root, f"Relocatable link failed: {output}") == 0
+
+
+def rebuild_project(root):
+    gcc = shutil.which("gcc")
+    if not gcc:
+        print(f"    [{RED}FAIL{NC}] gcc not found")
+        return False
+
+    build_dir = root / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    flags = build_include_flags()
+
+    print("Rebuilding compiler/runtime from current sources...")
+    compiler_sources = [
+        ("src/core/come_compiler.c", "build/come_compiler.o"),
+        ("src/core/codegen.c", "build/codegen.o"),
+        ("src/core/lexer.c", "build/lexer.o"),
+        ("src/core/parser.c", "build/parser.o"),
+        ("src/core/utils.c", "build/utils.o"),
+        ("src/array/array.c", "build/array.o"),
+        ("src/map/map.c", "build/map.o"),
+        ("src/mem/talloc.c", "build/talloc.o"),
+    ]
+    if not is_windows():
+        compiler_sources.append(("src/external/talloc/lib/talloc/talloc.c", "build/talloc_lib.o"))
+
+    for source, output in compiler_sources:
+        if not compile_object(root, gcc, flags, source, output):
+            return False
+
+    compiler_objs = [output for _, output in compiler_sources]
+    link_cmd = [gcc, *flags, "-o", compiler_path(root), *[root / obj for obj in compiler_objs]]
+    if not is_windows():
+        link_cmd.append("-ldl")
+    if run(link_cmd, root, "Compiler link failed") != 0:
+        return False
+
+    compiler = compiler_path(root)
+    runtime_modules = [
+        ("std", "src/std/std.c", "build/std.co.c", "build/std_manual.o", "build/std_gen.o", "build/std.o"),
+        ("string", "src/string/string.c", "build/string.co.c", "build/string_manual.o", "build/string_gen.o", "build/string.o"),
+    ]
+    for module, manual_c, generated_c, manual_o, generated_o, combined_o in runtime_modules:
+        if run([compiler, "genc", f"src/{module}/{module}.co", "-o", generated_c], root, f"Generate failed: {module}") != 0:
+            return False
+        if not compile_object(root, gcc, flags, manual_c, manual_o):
+            return False
+        if not compile_object(root, gcc, flags, generated_c, generated_o):
+            return False
+        if not combine_objects(root, combined_o, [manual_o, generated_o]):
+            return False
+
+    print(f"    [{GREEN}PASS{NC}] Rebuild complete")
+    return True
+
+
 def run_e2e_tests(root):
     test_files = sorted((root / "tests" / "test_files").glob("*.co"))
     if not test_files:
@@ -166,15 +263,7 @@ def run_unit_tests(root):
     build_tests = root / "build" / "tests"
     build_tests.mkdir(parents=True, exist_ok=True)
 
-    include_flags = [
-        "-Wall",
-        "-g",
-        "-D__STDC_WANT_LIB_EXT1__=1",
-        "-Isrc/include",
-        "-Isrc/core/include",
-        "-Isrc/external/talloc/lib/talloc",
-        "-Isrc/external/talloc/lib/replace",
-    ]
+    include_flags = build_include_flags()
 
     passed = 0
     failed = 0
@@ -269,6 +358,7 @@ def main():
     parser.add_argument("--e2e", action="store_true")
     parser.add_argument("--come", action="store_true")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--rebuild", action="store_true", help="rebuild compiler/runtime before running tests")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -276,6 +366,9 @@ def main():
 
     ok = True
     print(f"Platform: {platform.system()}")
+    needs_compiler = selected or args.e2e or args.come
+    if args.rebuild or (needs_compiler and not build_artifacts_ready(root)):
+        ok = rebuild_project(root) and ok
     if selected or args.e2e:
         ok = run_e2e_tests(root) and ok
     if selected or args.come:
